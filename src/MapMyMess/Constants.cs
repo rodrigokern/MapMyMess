@@ -16,4 +16,10 @@ internal partial class Constants
         Remove,
         None,
     }
+
+    public enum GraphMode
+    {
+        Projects,
+        Complete, // projects + dependencies
+    }
 }

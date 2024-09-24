@@ -13,15 +13,16 @@ internal class ProcessCommandHandler
 
     internal static void Process(ProcessCommand.Settings settings)
     {
-        string file = settings.Source;
-        string? restoreGraphOutputPath = settings.RestoreGraphOutputPath;
-
-        FileInfo fileInfo = new(file);
+        FileInfo fileInfo = new(settings.Source);
         bool reuse_rg = fileInfo.Extension == ".rg";
 
         string outFile = !string.IsNullOrWhiteSpace(settings.Output) ?
             settings.Output :
             Path.Combine(new DirectoryInfo(".").FullName, $"{fileInfo.Name}.html");
+
+        string restoreGraphOutputPath = !string.IsNullOrWhiteSpace(settings.RestoreGraphOutputPath) ?
+            settings.RestoreGraphOutputPath :
+            Path.Combine(new DirectoryInfo(".").FullName, $"{fileInfo.Name}.rg");
 
         //Parameter not a RestoreGraph file, must [re]build
         if (!reuse_rg)
@@ -29,28 +30,26 @@ internal class ProcessCommandHandler
             if (string.IsNullOrWhiteSpace(restoreGraphOutputPath))
                 restoreGraphOutputPath = Path.Combine(new DirectoryInfo(".").FullName, $"{fileInfo.Name}.rg");
 
-            if (!TryBuild(file, restoreGraphOutputPath))
+            if (!TryBuild(settings.Source, restoreGraphOutputPath))
                 return;
         }
 
-        SolutionGraph graph = ParseRestoreGraph(restoreGraphOutputPath, settings);
-        string diagram = PrintMermaidDiagram(graph, settings.GraphDirectionInput);
+        SolutionGraph graph = ParseRestoreGraph(restoreGraphOutputPath, settings.GraphModeInput);
+        string diagram = PrintMermaidDiagram(graph, settings.GraphDirectionInput, settings.ReductionActionInput);
         File.WriteAllText(outFile, diagram);
 
         outFile = new FileInfo(outFile).FullName;
         Console.WriteLine($"Done!");
-        AnsiConsole.MarkupLine($"Graph written to: [blue]{outFile}[/]");
+        AnsiConsole.MarkupLine($"Graph written to: [{ProcessCommand.Settings.COLOR_HIGHLIGHT}]{outFile}[/]");
     }
 
-    private static SolutionGraph ParseRestoreGraph(string path, ProcessCommand.Settings settings)
+    private static SolutionGraph ParseRestoreGraph(string path, GraphMode GraphMode)
     {
         var jsonString = File.ReadAllText(path);
 
         var jsonDom = JsonSerializer.Deserialize<JsonObject>(jsonString)!;
         var restores = jsonDom["restore"]!.AsObject().Select(t => t.Key).ToArray();
 
-        //TODO: add printDeps to settings
-        bool printDeps = false;
         List<string> projects = [];
         List<string> dependencies = [];
         SolutionGraph graph = new();
@@ -77,7 +76,7 @@ internal class ProcessCommandHandler
                 //TODO: only print reused?
                 //TODO: put deps in a box? (subgroup?)
                 #region Project Dependencies
-                if (!printDeps) continue;
+                if (GraphMode != GraphMode.Complete) continue;
                 //TODO: fix dependencies (add to graph)
                 JsonNode? deps = project["frameworks"]!.AsObject().First()!.Value!["dependencies"];
                 if (deps == null) continue;
@@ -131,17 +130,41 @@ internal class ProcessCommandHandler
         return true;
     }
 
-    private static string PrintMermaidDiagram(SolutionGraph graph, GraphDirection graphDirection)
+    private static string PrintMermaidDiagram(SolutionGraph graph, GraphDirection graphDirection, ReductionAction reductionAction)
     {
-        StringBuilder sb = new($"flowchart {graphDirection}");
+        StringBuilder sb = new($"flowchart {graphDirection}\n");
+        List<int> toColor = [];
+        int counter = 0;
 
         foreach (var node in graph.nodes.Values)
         {
-            foreach (var item in node.To)
+            foreach (var parent in node.From.ToArray())
             {
-                var s = $"\n{node.Name} --> {item.Name}";
-                sb.Append(s);
+                bool multiple = SolutionGraph.ParentIsAncestor(parent.Name, node);
+                switch (reductionAction)
+                {
+                    case ReductionAction.None:
+                        sb.AppendLine($"{parent.Name} --> {node.Name}");
+                        break;
+                    case ReductionAction.Color:
+                        sb.AppendLine($"{parent.Name} --> {node.Name}");
+                        if (multiple)
+                            toColor.Add(counter);
+                        break;
+                    case ReductionAction.Remove:
+                        if (!multiple)
+                            sb.AppendLine($"{parent.Name} --> {node.Name}");
+                        break;
+                }
+                counter++;
             }
+        }
+
+        if (toColor.Count > 0)
+        {
+            var coloredLines = string.Join(',', toColor);
+            if (reductionAction != ReductionAction.Remove)
+                sb.AppendLine($"linkStyle {coloredLines} stroke:#f00,stroke-width:2px;");
         }
 
         string diagram = sb.ToString();
